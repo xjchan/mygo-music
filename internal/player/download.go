@@ -28,10 +28,7 @@ func (p *Player) FindSong(src music.Source, t music.Track, quality string) (*Son
 	if f, st, ok := p.Cache.find(t.Source, t.ID, quality); ok {
 		return &Song{Type: st.Type, file: f}, nil
 	}
-	if src == nil {
-		return nil, errNoSource
-	}
-	st, err := src.Stream(t.ID, quality)
+	st, _, err := p.streamFor(src, t, quality)
 	if err != nil {
 		return nil, err
 	}

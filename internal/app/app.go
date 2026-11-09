@@ -65,10 +65,11 @@ type app struct {
 	// lists, and what comes back from a goroutine goes to the library it asked.
 	libs []*library
 	*library
-	local   *local.Source // the built-in source, nil in tests that have none
-	plugins []*plugin.Plugin
-	headers *headerPlugins // the plugins on, for the headers of their pictures
-	allLibs []*library     // every plugin, on or off; libs are those on
+	local    *local.Source // the built-in source, nil in tests that have none
+	plugins  []*plugin.Plugin
+	headers  *headerPlugins   // the plugins on, for the headers of their pictures
+	allLibs  []*library       // every plugin, on or off; libs are those on
+	fallback *fallbackPlugins // the plugins on that can answer for another source
 
 	wasBehind bool // the window wasn't at the front as last built
 
@@ -234,6 +235,7 @@ func (a *app) makeSources() {
 	plugin.SetWebSignIn(a.webSignIn)
 	a.plugins = plugin.Discover(pluginsDir(), userDataDir("plugin-data"))
 	a.headers = &headerPlugins{}
+	a.fallback = &fallbackPlugins{}
 	music.ImageHeaders = a.headers.image
 	for _, p := range a.plugins {
 		lib := newLibrary(p)
@@ -272,6 +274,15 @@ func (a *app) enabledChanged() {
 			}
 		}
 		a.headers.set(on)
+	}
+	if a.fallback != nil {
+		var can []*plugin.Plugin
+		for _, lib := range a.libs {
+			if p := pluginOf(lib); p != nil && p.Can("fallbackStream") {
+				can = append(can, p)
+			}
+		}
+		a.fallback.set(can)
 	}
 }
 
@@ -346,6 +357,9 @@ func Run() error {
 		a.pl.Quiet = func(fn func()) { mygo.RunOnMain(fn) }
 		a.pl.Source = a.sourceByID
 		a.pl.Failed = a.sourceFailed
+		if a.fallback != nil {
+			a.pl.Fallback = a.fallback.stream
+		}
 		a.pl.Quality = func() string { return a.settings.Quality }
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
 		a.pl.Cache = newSongCache(a.settings.CacheMB)

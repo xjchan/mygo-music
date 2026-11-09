@@ -13,6 +13,7 @@ A native desktop music player written in Go with [MyGo](https://github.com/egois
 - Podcast captions, written down on the device as episodes play
 - English and Simplified Chinese
 - Plugins can add accounts, catalogs, podcasts, stations, comments and pages of their own
+- A plugin can play a song its source can't
 
 ## Build
 
@@ -101,6 +102,7 @@ Export a function for each thing the plugin does. Each takes one object of param
 | `postComment` | `{trackId, text}` | `Comment` |
 | `lyrics` | `{id}` | `{lrc, translation}`, or `{lines}` with timed `words` |
 | `stream` | `{id, quality}` | `{url, type, headers, size, gain, peak}`, where `type` is `mp3`, `flac`, `ogg`, `wav`, `m4a` (ALAC, FLAC or AAC-LC, whole or in fragments as a DASH stream serves it) or `aac` (AAC-LC in ADTS) |
+| `fallbackStream` | `{track, quality, reason}` | a `Stream` for a song another source couldn't play, or `null`; `track` has the source's name, artists, album, duration and ID, and `reason` is `unavailable` or `error` |
 | `remotePlay` | `{ids, start, position}` | |
 | `remotePause`, `remoteResume` | | |
 | `remoteSeek` | `{position}` | |
@@ -132,6 +134,12 @@ The app translates the plugin's `name`, its settings' `label` and `help` and its
 With `"playback": "stream"`, the app plays what `stream` answers. With `"playback": "remote"`, the plugin makes the sound itself, or has another program do so, and the app calls the `remote` functions and polls `remoteState`.
 
 Throw an error with a `code` to say what's wrong: `signIn` prompts the listener to sign in, `setup` sends them to the plugin's settings, `unavailable` means this can't be played, and `unsupported` means the plugin doesn't do this. Any other error shows its message.
+
+### Playing another source's song
+
+A plugin that exports `fallbackStream` is asked after another source can't play a song, or can't fetch its audio. It gets the track's metadata, not its own ID, and answers a `Stream` or `null`; `null`, `unavailable` and `unsupported` let the next plugin, or the original error, take over. A source that asks for a sign-in or setup is left to say so.
+
+The plugin's permissions have to reach the service it asks; its API key belongs in its own settings, not the app's.
 
 ### Publishing a plugin
 

@@ -12,6 +12,7 @@ type ahead struct {
 	done                chan struct{} // closed once info, dl and err are in
 	info                *music.Stream
 	dl                  *download // nil for a song on disk, which opens at once
+	fallback            bool      // the fallback answered, not the source
 	err                 error
 }
 
@@ -60,17 +61,18 @@ func (p *Player) getAhead(quality string) {
 	p.ahead = a
 	go func() {
 		defer close(a.done)
-		info, err := src.Stream(t.ID, quality)
-		if err == nil && info == nil {
-			err = music.ErrUnavailable
-		}
+		info, fallback, err := p.streamFor(src, t, quality)
 		if err != nil {
 			a.err = err
 			return
 		}
-		a.info = info
+		a.info, a.fallback = info, fallback
 		if _, isFile := music.PathOf(info.URL); !isFile {
-			a.dl = p.Cache.download(t.Source, t.ID, quality, info)
+			if p.Cache != nil {
+				a.dl = p.Cache.download(t.Source, t.ID, quality, info)
+			} else {
+				a.dl = startDownload(info.URL, info.Size, info.Headers, nil, nil)
+			}
 		}
 	}()
 }

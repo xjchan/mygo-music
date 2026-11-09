@@ -42,6 +42,10 @@ type Player struct {
 	Normalize func() bool
 	// Cache keeps the songs played, if set.
 	Cache *Cache
+	// Fallback, if set, answers audio for a track whose source couldn't: another
+	// plugin, asked only after the source's own answer failed.
+	// reason is "unavailable" or "error", for what the source said.
+	Fallback func(t music.Track, quality, reason string) (*music.Stream, error)
 	// Changed, if set, hears that what plays, where it is or whether it
 	// plays changed.
 	Changed func()
@@ -64,7 +68,7 @@ type Player struct {
 	track   *music.Track
 	out     *audio.Player
 	stream  stream
-	watch   *watched // stream, as out plays it
+	watch   *watched      // stream, as out plays it
 	info    *music.Stream // what the current track streams
 	fade    fader
 	gain    float64 // the current track's normalizing gain
@@ -823,55 +827,140 @@ var errNoSource = errors.New("player: no such source")
 // there, or else streamed into the cache, and kept once it has all come in.
 // What failed ahead is asked for again: it may have been a moment's.
 func (p *Player) open(src music.Source, t music.Track, quality string, pre *ahead) (*music.Stream, stream, error) {
-	if src == nil {
-		if pre != nil {
-			pre.close()
+	info, dl, triedFallback, err := p.openAudio(src, t, quality, pre)
+	if err == nil {
+		var s stream
+		if s, err = openStream(dl, t.Duration); err == nil {
+			return info, s, nil
 		}
-		return nil, nil, errNoSource
+		dl.Close()
 	}
+	// A source that can't play it, or audio that turns out not to be audio,
+	// is what the fallback is for. A source asking for a sign-in or setup is
+	// left to say so: those pages are where the listener fixes it.
+	if triedFallback || !p.canFallback(t, err) {
+		return nil, nil, err
+	}
+	if st, s, ok := p.openFallback(t, quality, err); ok {
+		return st, s, nil
+	}
+	return nil, nil, err
+}
+
+// openAudio finds where t plays, from what was asked for ahead, the cache, or
+// the source, or else the fallback. It says whether the fallback was asked.
+func (p *Player) openAudio(src music.Source, t music.Track, quality string, pre *ahead) (*music.Stream, *download, bool, error) {
 	var dl *download
 	var info *music.Stream
+	fallback := false
 	ok := false
 	if pre != nil {
 		<-pre.done
+		fallback = pre.fallback
 		if pre.err == nil {
 			info, dl, ok = pre.info, pre.dl, true
 			if dl == nil {
 				path, _ := music.PathOf(info.URL)
 				var err error
 				if dl, err = openFile(path); err != nil {
-					return nil, nil, err
+					return nil, nil, fallback, err
 				}
 			}
 		}
 	}
-	if !ok {
+	if !ok && p.Cache != nil {
 		dl, info, ok = p.Cache.lookup(t.Source, t.ID, quality)
 	}
-	if !ok {
-		var err error
-		info, err = src.Stream(t.ID, quality)
-		if err != nil {
-			return nil, nil, err
-		}
-		if info == nil {
-			return nil, nil, music.ErrUnavailable
-		}
-		if path, isFile := music.PathOf(info.URL); isFile {
-			dl, err = openFile(path)
-			if err != nil {
-				return nil, nil, err
-			}
-		} else {
-			dl = p.Cache.download(t.Source, t.ID, quality, info)
-		}
+	if ok {
+		return info, dl, fallback, nil
+	}
+	info, fallback, err := p.streamFor(src, t, quality)
+	if err != nil {
+		return nil, nil, fallback, err
+	}
+	dl, err = p.downloadStream(t, quality, info)
+	if err != nil {
+		return nil, nil, fallback, err
+	}
+	return info, dl, fallback, nil
+}
+
+// openFallback asks the fallback for t, once the source, or what it answered,
+// couldn't play it. It says whether it worked.
+func (p *Player) openFallback(t music.Track, quality string, cause error) (*music.Stream, stream, bool) {
+	if p.Fallback == nil {
+		return nil, nil, false
+	}
+	info, err := p.Fallback(t, quality, fallbackReason(cause))
+	if err != nil || info == nil || info.URL == "" {
+		return nil, nil, false
+	}
+	dl, err := p.downloadStream(t, quality, info)
+	if err != nil {
+		return nil, nil, false
 	}
 	s, err := openStream(dl, t.Duration)
 	if err != nil {
 		dl.Close()
-		return nil, nil, err
+		return nil, nil, false
 	}
-	return info, s, nil
+	return info, s, true
+}
+
+// streamFor asks the source for t's stream, and the fallback if it can't
+// answer. It answers the error the source gave when the fallback can't help,
+// so the listener sees why the source itself didn't play it. The bool says
+// the fallback was asked, whether or not it answered.
+func (p *Player) streamFor(src music.Source, t music.Track, quality string) (*music.Stream, bool, error) {
+	cause := errNoSource
+	if src != nil {
+		info, err := src.Stream(t.ID, quality)
+		if err == nil && info != nil && info.URL != "" {
+			return info, false, nil
+		}
+		if err != nil {
+			cause = err
+		} else {
+			cause = music.ErrUnavailable
+		}
+	}
+	if !p.canFallback(t, cause) {
+		return nil, false, cause
+	}
+	info, err := p.Fallback(t, quality, fallbackReason(cause))
+	if err != nil || info == nil || info.URL == "" {
+		return nil, true, cause
+	}
+	return info, true, nil
+}
+
+// fallbackReason names what the source said, for the fallback to know whether
+// the song is missing or something went wrong.
+func fallbackReason(err error) string {
+	if errors.Is(err, music.ErrUnavailable) {
+		return "unavailable"
+	}
+	return "error"
+}
+
+// canFallback reports whether the fallback may answer for t, given what the
+// source said: not for an episode, which a music service doesn't have, nor
+// when the source wants the listener to sign in or set it up first.
+func (p *Player) canFallback(t music.Track, err error) bool {
+	return p.Fallback != nil && t.ShowID == "" &&
+		!errors.Is(err, music.ErrSignIn) && !errors.Is(err, music.ErrSetup)
+}
+
+// downloadStream makes the download of a stream, from disk or the cache, or
+// memory when there's no cache.
+func (p *Player) downloadStream(t music.Track, quality string, st *music.Stream) (*download, error) {
+	if path, isFile := music.PathOf(st.URL); isFile {
+		return openFile(path)
+	}
+	if p.Cache == nil {
+		return startDownload(st.URL, st.Size, st.Headers, nil, nil), nil
+	}
+	return p.Cache.download(t.Source, t.ID, quality, st), nil
 }
 
 // openFile opens a song on disk as a download that has all of it in.

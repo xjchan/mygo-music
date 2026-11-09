@@ -2,6 +2,13 @@
 
 All notable changes to MyGo Music are written down here. Versions follow [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+
+- A plugin can export `fallbackStream` to play a song another source couldn't, with the track's metadata rather than its own ID.
+- The app asks every enabled plugin with `fallbackStream` in turn when a source can't play a song or fetch its audio, skipping the source that failed.
+
 ## [0.1.22] - 2026-11-07
 
 ### Fixed
